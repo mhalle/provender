@@ -8,15 +8,20 @@ project could use the same store rather than write a parallel one.
 from provender import Blobs, check_store, open_store
 
 store, prefix = open_store("s3://bucket/myproject")   # credentials from the environment
-check_store(store, prefix)                            # refuse a store that cannot do this
+check_store(store, prefix, updates=False)             # blobs need create-if-absent only
 blobs = Blobs(store, prefix)
 
 blob = blobs.put_file("field.rkf")          # {"digest": "sha256:...", "size": 24_117_248}
 blobs.has(blob["digest"])                   # True
 blobs.fetch(blob["digest"], "copy.rkf")     # True; False if it is gone or was wrong
-list(blobs.iter())                          # every blob under this prefix, with sizes
-blobs.sweep(keep={blob["digest"]})          # delete what the caller says is unreferenced
+blobs.entries()                             # every blob under this prefix, with sizes
+blobs.sweep(keep=live_digests)              # deletes unreferenced blobs over a day old
 ```
+
+`check_store(store, prefix)` — without `updates=False` — also demands
+replace-if-unchanged, which only the mutable half (0.2) needs. Ask for it if you will want
+that half: S3, GCS, Azure and R2 all pass, while obstore's local-filesystem store passes
+the blobs-only check and fails the other.
 
 ## What it is
 
@@ -34,9 +39,11 @@ A blob is named by the SHA-256 of its own content and written **only if absent**
   below.
 - **Decide what is garbage.** `sweep` deletes what the CALLER says is unreferenced, and
   only under its own prefix. Knowing which blobs are live belongs to whoever writes the
-  index — see "Prefixes" below. An empty live set is REFUSED (`EmptyKeepSet`) unless
-  `allow_empty=True`, because "nothing is live" and "I could not read my index" arrive
-  here as the same value, and only one of them means delete everything.
+  index — see "Prefixes" below. Two things are dangerous only on purpose: an empty live
+  set is REFUSED (`EmptyKeepSet`) unless `allow_empty=True`, because "nothing is live" and
+  "I could not read my index" arrive as the same value; and blobs younger than `grace_s`
+  (a day by default) are spared, because every client writes a blob before the index entry
+  that names it, and in that window a live blob looks exactly like garbage.
 - **Delete a blob that failed verification.** A blob belongs to every result whose bytes
   were identical, and one client's bad read (a truncated stream reads the same as a corrupt
   object) is not grounds to remove it for everyone. It is remembered as suspect instead:

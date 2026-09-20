@@ -32,10 +32,14 @@ def open_store(url: str):
         from obstore.store import MemoryStore
         return MemoryStore(), _prefix(u.netloc + u.path)
     if scheme == "file":
+        # the whole path is the ROOT, and there is no prefix: a directory already is one.
+        # An earlier version read a prefix out of the URL fragment, which nobody would
+        # guess and nothing tested (feldglas review, 2026-09-20). Pass a prefix to `Blobs`
+        # if you want to namespace inside a directory.
         from obstore.store import LocalStore
         root = Path(u.path)
         root.mkdir(parents=True, exist_ok=True)
-        return LocalStore(root), _prefix(u.fragment)
+        return LocalStore(root), ""
     if scheme in ("s3", "s3a", "gs", "az", "abfs", "abfss") and u.netloc:
         from obstore.store import from_url
         return from_url(f"{scheme}://{u.netloc}"), _prefix(u.path)

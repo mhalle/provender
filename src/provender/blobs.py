@@ -14,6 +14,9 @@ from pathlib import Path
 
 #: Read and hashed in chunks of this size; also the streaming chunk for a fetch.
 CHUNK = 1 << 20
+#: How old a blob must be before a sweep may take it, by default. Covers the window every
+#: client has between writing a blob and writing the index entry that names it.
+GRACE_S = 24 * 3600
 
 
 class EmptyKeepSet(ValueError):
@@ -60,6 +63,11 @@ class Blobs:
         Create-if-absent, so a concurrent write of the same bytes is not a conflict - it is
         the same object by definition, and whichever landed first is kept. A digest this
         process has found WRONG in the store is overwritten instead of deduplicated onto.
+
+        The file is hashed and THEN uploaded, so a file rewritten in between is stored
+        under the name of what it used to be. A later ``fetch`` catches that and suspects
+        the blob, but the cheap fix is on the caller's side: write to a temporary name and
+        rename it into place, then hand this the finished file.
         """
         import obstore
         from obstore.exceptions import AlreadyExistsError
@@ -133,7 +141,7 @@ class Blobs:
         finally:
             tmp.unlink(missing_ok=True)
 
-    def iter(self, *, older_than: float | None = None):
+    def entries(self, *, older_than: float | None = None):
         """Every blob under this prefix as ``{"digest", "size", "modified"}``, oldest first
         where the store reports a time.
 
@@ -160,22 +168,31 @@ class Blobs:
         out.sort(key=lambda b: (b["modified"] is None, b["modified"]))
         return out
 
-    def sweep(self, *, keep, older_than: float | None = None,
+    def sweep(self, *, keep, grace_s: float = GRACE_S, now: float | None = None,
               allow_empty: bool = False) -> dict:
-        """Delete blobs under this prefix that ``keep`` does not contain.
+        """Delete blobs under this prefix that ``keep`` does not contain and that are older
+        than ``grace_s``.
 
         ``keep`` is the caller's set of live digests (or blob records). This module has no
         idea which blobs an index references, and guessing is how a garbage collector eats
         live data.
 
+        **The grace is not optional decoration.** Every client writes the blob first and
+        its index afterwards, so between those two a live blob is indistinguishable from
+        garbage. A day is far longer than that window and costs only storage; sweeping
+        without one deletes a blob uploaded a second ago (observed from the feldglas side,
+        2026-09-20, when the extraction kept the mechanism and dropped the default).
+        ``grace_s=0`` is allowed and means what it says.
+
         An EMPTY ``keep`` is refused unless ``allow_empty`` says so, because "nothing is
         live" and "I could not read my index" arrive here as the same value - an unreadable
-        manifest, a listing that failed, a client whose pointers have not been written yet.
+        manifest, a listing that failed, a client whose index has not been written yet.
         Deleting everything is a legitimate request and a catastrophic accident, so it has
-        to be said on purpose (raised as ``EmptyKeepSet``). This is the same rule the
-        pointer half applies when it meets an entry it cannot read: cleanup must refuse
-        what it cannot account for.
+        to be said on purpose (``EmptyKeepSet``). Both defaults follow one rule: cleanup
+        refuses what it cannot account for, and anything dangerous is done on purpose.
         """
+        import time as _time
+
         import obstore
         live = {d if isinstance(d, str) else d["digest"] for d in keep}
         if not live and not allow_empty:
@@ -183,13 +200,15 @@ class Blobs:
                 "sweep was given no live digests: pass allow_empty=True to mean "
                 "'delete every blob under this prefix', or fix the caller that could "
                 "not read its index")
-        deleted = 0
-        for blob in self.iter(older_than=older_than):
+        cutoff = (_time.time() if now is None else now) - grace_s
+        deleted, spared = 0, 0
+        for blob in self.entries(older_than=cutoff):
             if blob["digest"] in live:
                 continue
             try:
                 obstore.delete(self.store, self.path(blob["digest"]))
             except FileNotFoundError:
-                pass
+                spared += 1                    # already gone: not this sweep's doing
+                continue
             deleted += 1
-        return {"deleted": deleted}
+        return {"deleted": deleted, "already_gone": spared}
