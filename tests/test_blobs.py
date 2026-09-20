@@ -18,7 +18,8 @@ import pytest
 obstore = pytest.importorskip("obstore")
 from obstore.store import LocalStore, MemoryStore  # noqa: E402
 
-from provender import Blobs, StoreUnsuitable, check_store, digest_file, open_store  # noqa: E402
+from provender import (Blobs, EmptyKeepSet, StoreUnsuitable,  # noqa: E402
+                       check_store, digest_file, open_store)
 
 
 class _Fixture(unittest.TestCase):
@@ -60,7 +61,7 @@ class TestNaming(_Fixture):
         mine = self.blobs.put_file(self.file("a", b"mine"))
         theirs = other.put_file(self.file("b", b"theirs"))
         self.assertEqual([mine["digest"]], [b["digest"] for b in self.blobs.iter()])
-        self.blobs.sweep(keep=set())           # takes everything of ITS own
+        self.blobs.sweep(keep=set(), allow_empty=True)   # takes everything of ITS own
         self.assertEqual([], self.blobs.iter())
         self.assertTrue(other.has(theirs["digest"]), "another project's bytes are not ours")
 
@@ -134,15 +135,29 @@ class TestListingAndSweep(_Fixture):
 
     def test_sweep_honors_older_than(self):
         blob = self.blobs.put_file(self.file("a", b"young"))
-        self.assertEqual({"deleted": 0}, self.blobs.sweep(keep=set(),
-                                                          older_than=time.time() - 60))
+        self.assertEqual({"deleted": 0}, self.blobs.sweep(
+            keep=set(), allow_empty=True, older_than=time.time() - 60))
         self.assertTrue(self.blobs.has(blob["digest"]))
+
+    def test_sweep_refuses_an_empty_live_set_unless_it_is_meant(self):
+        """"Nothing is live" and "I could not read my index" arrive as the same value: an
+        unreadable manifest, a failed listing, a client whose pointers do not exist yet.
+        A client that stores its map of names to digests outside the store - which is what
+        a blobs-only consumer does until the pointer half lands - would otherwise sweep
+        its entire dataset the first time that map failed to load."""
+        blob = self.blobs.put_file(self.file("a", b"precious"))
+        with self.assertRaises(EmptyKeepSet):
+            self.blobs.sweep(keep=set())
+        with self.assertRaises(EmptyKeepSet):
+            self.blobs.sweep(keep=[])
+        self.assertTrue(self.blobs.has(blob["digest"]), "nothing was deleted")
+        self.assertEqual({"deleted": 1}, self.blobs.sweep(keep=set(), allow_empty=True))
 
     def test_a_foreign_object_under_blobs_is_left_alone(self):
         obstore.put(self.store, "proj/blobs/sha256/notadigest", b"x")
         obstore.put(self.store, "proj/blobs/sha256/nested/thing", b"x")
         self.assertEqual([], self.blobs.iter())
-        self.assertEqual({"deleted": 0}, self.blobs.sweep(keep=set()))
+        self.assertEqual({"deleted": 0}, self.blobs.sweep(keep=set(), allow_empty=True))
 
 
 class TestStoreChecks(unittest.TestCase):

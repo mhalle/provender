@@ -16,6 +16,10 @@ from pathlib import Path
 CHUNK = 1 << 20
 
 
+class EmptyKeepSet(ValueError):
+    """``sweep`` was asked to keep nothing. See :meth:`Blobs.sweep`."""
+
+
 def digest_file(path) -> str:
     """``sha256:<hex>`` of a file's contents."""
     h = hashlib.sha256()
@@ -156,16 +160,29 @@ class Blobs:
         out.sort(key=lambda b: (b["modified"] is None, b["modified"]))
         return out
 
-    def sweep(self, *, keep, older_than: float | None = None) -> dict:
+    def sweep(self, *, keep, older_than: float | None = None,
+              allow_empty: bool = False) -> dict:
         """Delete blobs under this prefix that ``keep`` does not contain.
 
-        ``keep`` is the caller's set of live digests - this module has no idea which blobs
-        an index references, and guessing is how a garbage collector eats live data. The
-        caller is expected to have refused to sweep at all if it could not read part of its
-        own index: cleanup must refuse what it cannot account for.
+        ``keep`` is the caller's set of live digests (or blob records). This module has no
+        idea which blobs an index references, and guessing is how a garbage collector eats
+        live data.
+
+        An EMPTY ``keep`` is refused unless ``allow_empty`` says so, because "nothing is
+        live" and "I could not read my index" arrive here as the same value - an unreadable
+        manifest, a listing that failed, a client whose pointers have not been written yet.
+        Deleting everything is a legitimate request and a catastrophic accident, so it has
+        to be said on purpose (raised as ``EmptyKeepSet``). This is the same rule the
+        pointer half applies when it meets an entry it cannot read: cleanup must refuse
+        what it cannot account for.
         """
         import obstore
         live = {d if isinstance(d, str) else d["digest"] for d in keep}
+        if not live and not allow_empty:
+            raise EmptyKeepSet(
+                "sweep was given no live digests: pass allow_empty=True to mean "
+                "'delete every blob under this prefix', or fix the caller that could "
+                "not read its index")
         deleted = 0
         for blob in self.iter(older_than=older_than):
             if blob["digest"] in live:

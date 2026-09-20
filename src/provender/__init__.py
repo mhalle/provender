@@ -8,9 +8,9 @@ interface has been cut against a local-filesystem backend as well as this one.
 Importing this module pulls the standard library only: obstore is imported inside the
 functions that talk to a store.
 """
-from .blobs import CHUNK, Blobs, digest_file
+from .blobs import CHUNK, Blobs, EmptyKeepSet, digest_file
 from .store import StoreUnsuitable, check_store, open_store, update_mode
 
 __version__ = "0.1.0"
-__all__ = ["Blobs", "CHUNK", "StoreUnsuitable", "check_store", "digest_file", "open_store",
-           "update_mode", "__version__"]
+__all__ = ["Blobs", "CHUNK", "EmptyKeepSet", "StoreUnsuitable", "check_store",
+           "digest_file", "open_store", "update_mode", "__version__"]
