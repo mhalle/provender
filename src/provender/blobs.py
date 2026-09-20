@@ -68,6 +68,15 @@ class Blobs:
         under the name of what it used to be. A later ``fetch`` catches that and suspects
         the blob, but the cheap fix is on the caller's side: write to a temporary name and
         rename it into place, then hand this the finished file.
+
+        When the bytes are already stored, the object's LAST-MODIFIED is refreshed (a
+        server-side copy onto itself: no upload, no download, one request). Deduplication
+        otherwise breaks the one rule a sweep relies on - that a blob an index entry names
+        was written no earlier than that entry. A recomputation producing identical bytes
+        uploads nothing, so the blob keeps its old timestamp and is a candidate for a sweep
+        that is about to be told about the entry naming it; reviewers reproduced the loss
+        in both haversack's sweep and its delete (2026-09-20). Refreshing makes the blob as
+        young as the reference to it, which is what the grace is measured against.
         """
         import obstore
         from obstore.exceptions import AlreadyExistsError
@@ -76,12 +85,30 @@ class Blobs:
         if blob["digest"] in self.suspect:
             obstore.put(self.store, self.path(blob["digest"]), src)
             self.suspect -= {blob["digest"]}
-        elif not self.has(blob["digest"]):
+        elif not self.touch(blob["digest"]):
             try:
                 obstore.put(self.store, self.path(blob["digest"]), src, mode="create")
             except AlreadyExistsError:
-                pass                           # someone else wrote the same bytes first
+                self.touch(blob["digest"])     # someone else wrote the same bytes first
         return blob
+
+    def touch(self, digest: str) -> bool:
+        """Refresh a stored blob's last-modified; False when it is not there.
+
+        A server-side copy onto itself - the bytes never move - so this costs one request
+        whatever the blob's size (measured on Cloudflare R2, 2026-09-20: a 32 MB blob's
+        timestamp moves in well under a second). A store that refuses the copy leaves the
+        timestamp alone and answers True: the blob IS present, which is what the caller
+        asked, and the caller's own grace still covers the window.
+        """
+        import obstore
+        try:
+            obstore.copy(self.store, self.path(digest), self.path(digest), overwrite=True)
+            return True
+        except FileNotFoundError:
+            return False
+        except Exception:                      # noqa: BLE001 - see the docstring
+            return self.has(digest)
 
     def put_bytes(self, data: bytes) -> dict:
         import obstore
@@ -90,11 +117,11 @@ class Blobs:
         if blob["digest"] in self.suspect:
             obstore.put(self.store, self.path(blob["digest"]), data)
             self.suspect -= {blob["digest"]}
-        elif not self.has(blob["digest"]):
+        elif not self.touch(blob["digest"]):
             try:
                 obstore.put(self.store, self.path(blob["digest"]), data, mode="create")
             except AlreadyExistsError:
-                pass
+                self.touch(blob["digest"])
         return blob
 
     def has(self, digest: str) -> bool:

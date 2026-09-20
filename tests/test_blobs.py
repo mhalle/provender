@@ -387,3 +387,43 @@ class TestPreListedCandidates(_Fixture):
     def test_an_empty_candidate_list_still_refuses_an_empty_keep_set(self):
         with self.assertRaises(EmptyKeepSet):
             self.blobs.sweep(keep=set(), candidates=[])
+
+
+class TestDedupRefreshesTheTimestamp(_Fixture):
+    """A sweep's one rule is that a blob an index entry names was written no earlier than
+    that entry. Deduplication broke it: a recomputation that produces identical bytes
+    uploads nothing, so the blob kept a timestamp older than the entry about to name it -
+    and was swept out from under it (reproduced in haversack, 2026-09-20)."""
+
+    def test_storing_bytes_that_are_already_here_makes_them_young_again(self):
+        blob = self.blobs.put_file(self.file("a", b"identical output"))
+        before = self.blobs.entries()[0]["modified"]
+        time.sleep(0.05)
+        again = self.blobs.put_file(self.file("b", b"identical output"))
+        self.assertEqual(blob, again)
+        self.assertGreater(self.blobs.entries()[0]["modified"], before)
+
+    def test_the_refreshed_blob_is_no_longer_an_old_candidate(self):
+        self.blobs.put_file(self.file("a", b"identical output"))
+        cutoff = time.time()
+        time.sleep(0.05)
+        self.blobs.put_file(self.file("b", b"identical output"))   # the dedup publication
+        candidates = self.blobs.entries(older_than=cutoff)
+        self.assertEqual([], candidates, "it is as young as the entry that names it")
+
+    def test_put_bytes_refreshes_too(self):
+        self.blobs.put_bytes(b"identical output")
+        before = self.blobs.entries()[0]["modified"]
+        time.sleep(0.05)
+        self.blobs.put_bytes(b"identical output")
+        self.assertGreater(self.blobs.entries()[0]["modified"], before)
+
+    def test_touch_says_when_a_blob_is_not_there(self):
+        self.assertFalse(self.blobs.touch(f"sha256:{'0' * 64}"))
+
+    def test_a_store_that_refuses_the_copy_still_reports_presence(self):
+        blob = self.blobs.put_file(self.file("a", b"payload"))
+        with unittest.mock.patch.object(obstore, "copy",
+                                        side_effect=NotImplementedError("no copy here")):
+            self.assertTrue(self.blobs.touch(blob["digest"]))
+            self.assertEqual(blob, self.blobs.put_file(self.file("b", b"payload")))
