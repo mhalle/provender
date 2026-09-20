@@ -125,7 +125,7 @@ class TestListingAndSweep(_Fixture):
         live = self.blobs.put_file(self.file("a", b"live"))
         dead = self.blobs.put_file(self.file("b", b"dead"))
         got = self.blobs.sweep(keep={live["digest"]}, grace_s=0)
-        self.assertEqual({"deleted": 1, "already_gone": 0}, got)
+        self.assertEqual({"deleted": 1, "already_gone": 0, "refreshed": 0}, got)
         self.assertTrue(self.blobs.has(live["digest"]))
         self.assertFalse(self.blobs.has(dead["digest"]))
 
@@ -136,8 +136,8 @@ class TestListingAndSweep(_Fixture):
 
     def test_sweep_spares_a_blob_inside_the_grace(self):
         blob = self.blobs.put_file(self.file("a", b"young"))
-        self.assertEqual({"deleted": 0, "already_gone": 0}, self.blobs.sweep(
-            keep=set(), allow_empty=True, grace_s=60))
+        self.assertEqual({"deleted": 0, "already_gone": 0, "refreshed": 0},
+                         self.blobs.sweep(keep=set(), allow_empty=True, grace_s=60))
         self.assertTrue(self.blobs.has(blob["digest"]))
 
     def test_sweep_refuses_an_empty_live_set_unless_it_is_meant(self):
@@ -152,14 +152,14 @@ class TestListingAndSweep(_Fixture):
         with self.assertRaises(EmptyKeepSet):
             self.blobs.sweep(keep=[])
         self.assertTrue(self.blobs.has(blob["digest"]), "nothing was deleted")
-        self.assertEqual({"deleted": 1, "already_gone": 0},
+        self.assertEqual({"deleted": 1, "already_gone": 0, "refreshed": 0},
                          self.blobs.sweep(keep=set(), grace_s=0, allow_empty=True))
 
     def test_a_foreign_object_under_blobs_is_left_alone(self):
         obstore.put(self.store, "proj/blobs/sha256/notadigest", b"x")
         obstore.put(self.store, "proj/blobs/sha256/nested/thing", b"x")
         self.assertEqual([], self.blobs.entries())
-        self.assertEqual({"deleted": 0, "already_gone": 0},
+        self.assertEqual({"deleted": 0, "already_gone": 0, "refreshed": 0},
                          self.blobs.sweep(keep=set(), grace_s=0, allow_empty=True))
 
 
@@ -263,7 +263,7 @@ class TestSweepGrace(_Fixture):
             raise FileNotFoundError(path)
         with unittest.mock.patch.object(obstore, "delete", already_gone):
             got = self.blobs.sweep(keep={"sha256:" + "0" * 64}, grace_s=0)
-        self.assertEqual({"deleted": 0, "already_gone": 1}, got,
+        self.assertEqual({"deleted": 0, "already_gone": 1, "refreshed": 0}, got,
                          "`deleted` is what THIS sweep removed")
 
 
@@ -361,7 +361,7 @@ class TestPreListedCandidates(_Fixture):
         # the index is read here, and a second writer publishes in the meantime
         fresh = self.blobs.put_file(self.file("b", b"published mid-sweep"))
         got = self.blobs.sweep(keep={old["digest"]}, candidates=candidates, grace_s=0)
-        self.assertEqual({"deleted": 0, "already_gone": 0}, got)
+        self.assertEqual({"deleted": 0, "already_gone": 0, "refreshed": 0}, got)
         self.assertTrue(self.blobs.has(fresh["digest"]), "it was never a candidate")
         self.assertTrue(self.blobs.has(old["digest"]))
 
@@ -427,3 +427,48 @@ class TestDedupRefreshesTheTimestamp(_Fixture):
                                         side_effect=NotImplementedError("no copy here")):
             self.assertTrue(self.blobs.touch(blob["digest"]))
             self.assertEqual(blob, self.blobs.put_file(self.file("b", b"payload")))
+
+
+class TestCandidatesAreRecheckedBeforeDeletion(_Fixture):
+    """Pre-listing cannot save a DEDUPLICATED write: the object is genuinely old while the
+    reference to it is new, so it sits in the candidate list looking like garbage. The
+    re-check before each delete is what closes that (haversack review, 2026-09-20)."""
+
+    def test_a_blob_refreshed_after_the_listing_is_spared(self):
+        orphan = self.blobs.put_file(self.file("a", b"identical output"))
+        candidates = self.blobs.entries(older_than=time.time() + 60)
+        keeper = self.blobs.put_file(self.file("b", b"something else"))
+        time.sleep(0.02)
+        self.blobs.put_file(self.file("c", b"identical output"))   # dedupes: touch only
+        got = self.blobs.sweep(keep={keeper["digest"]}, candidates=candidates, grace_s=0)
+        self.assertEqual(1, got["refreshed"])
+        self.assertEqual(0, got["deleted"])
+        self.assertTrue(self.blobs.has(orphan["digest"]))
+
+    def test_a_blob_nobody_touched_still_goes(self):
+        orphan = self.blobs.put_file(self.file("a", b"garbage"))
+        keeper = self.blobs.put_file(self.file("b", b"live"))
+        candidates = self.blobs.entries(older_than=time.time() + 60)
+        got = self.blobs.sweep(keep={keeper["digest"]}, candidates=candidates, grace_s=0)
+        self.assertEqual(1, got["deleted"])
+        self.assertFalse(self.blobs.has(orphan["digest"]))
+
+    def test_a_candidate_whose_state_cannot_be_read_is_spared(self):
+        orphan = self.blobs.put_file(self.file("a", b"garbage"))
+        keeper = self.blobs.put_file(self.file("b", b"live"))
+        candidates = self.blobs.entries(older_than=time.time() + 60)
+        from obstore.exceptions import PermissionDeniedError
+        with unittest.mock.patch.object(obstore, "head",
+                                        side_effect=PermissionDeniedError("403")):
+            got = self.blobs.sweep(keep={keeper["digest"]}, candidates=candidates,
+                                   grace_s=0)
+        self.assertEqual(0, got["deleted"], "a sweep that cannot tell does not delete")
+        self.assertTrue(self.blobs.has(orphan["digest"]))
+
+    def test_a_candidate_with_no_timestamp_is_spared(self):
+        self.blobs.put_file(self.file("a", b"garbage"))
+        keeper = self.blobs.put_file(self.file("b", b"live"))
+        candidates = [{**c, "modified": None}
+                      for c in self.blobs.entries(older_than=time.time() + 60)]
+        got = self.blobs.sweep(keep={keeper["digest"]}, candidates=candidates, grace_s=0)
+        self.assertEqual(0, got["deleted"])

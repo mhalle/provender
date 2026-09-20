@@ -226,6 +226,16 @@ class Blobs:
         whole seconds, so with ``grace_s=0`` a blob written moments ago can read as old
         enough to take (found reviewing haversack's use, 2026-09-20). Candidates are used
         as given; the age filter belongs to the :meth:`entries` call that produced them.
+
+        Each candidate is RE-CHECKED immediately before it is deleted, and spared if the
+        stored object is no longer the one that was listed - a newer last-modified means
+        someone wrote or refreshed it in between. Pre-listing alone is not enough, because
+        a client that deduplicates does not write a blob it already has: the object is
+        genuinely old while the reference to it is new, so it sits in the candidate list
+        with nothing to distinguish it (found by a reviewer of haversack, 2026-09-20, after
+        two earlier attempts at this window). With :meth:`touch` moving the timestamp on
+        every deduplicated write, that re-check is what closes it: one HEAD per object
+        actually being deleted, and none for the ones being kept.
         """
         import time as _time
 
@@ -239,9 +249,12 @@ class Blobs:
         if candidates is None:
             cutoff = (_time.time() if now is None else now) - grace_s
             candidates = self.entries(older_than=cutoff)
-        deleted, spared = 0, 0
+        deleted, spared, refreshed = 0, 0, 0
         for blob in candidates:
             if blob["digest"] in live:
+                continue
+            if not self._unchanged(blob):
+                refreshed += 1                 # written or refreshed since it was listed
                 continue
             try:
                 obstore.delete(self.store, self.path(blob["digest"]))
@@ -249,4 +262,24 @@ class Blobs:
                 spared += 1                    # already gone: not this sweep's doing
                 continue
             deleted += 1
-        return {"deleted": deleted, "already_gone": spared}
+        return {"deleted": deleted, "already_gone": spared, "refreshed": refreshed}
+
+    def _unchanged(self, blob) -> bool:
+        """Is the stored object still the one ``blob`` describes? Unknown counts as
+        CHANGED: a sweep that cannot tell does not delete."""
+        import datetime as _dt
+
+        import obstore
+        listed = blob.get("modified")
+        if listed is None:
+            return False
+        try:
+            meta = obstore.head(self.store, self.path(blob["digest"]))
+        except FileNotFoundError:
+            return True                        # gone already; the delete will say so
+        except Exception:                      # noqa: BLE001 - see the docstring
+            return False
+        now = meta.get("last_modified")
+        if isinstance(now, _dt.datetime):
+            now = now.timestamp()
+        return isinstance(now, (int, float)) and now <= listed
