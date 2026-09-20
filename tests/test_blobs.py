@@ -347,3 +347,43 @@ class TestTheProbeRuns(unittest.TestCase):
         finally:
             sys.path.pop(0)
         self.assertEqual(0, probe_store.main(["memory://probe2", "--size-mb", "0"]))
+
+
+class TestPreListedCandidates(_Fixture):
+    """A caller that lists blobs BEFORE reading its index is safe from its own clock: a
+    blob written after the listing was never a candidate. Listing inside `sweep` left only
+    an age comparison between the caller's clock and the store's, and S3 truncates
+    last-modified to whole seconds (found reviewing haversack's use, 2026-09-20)."""
+
+    def test_a_blob_written_after_the_listing_is_not_swept(self):
+        old = self.blobs.put_file(self.file("a", b"already here"))
+        candidates = self.blobs.entries(older_than=time.time() + 60)
+        # the index is read here, and a second writer publishes in the meantime
+        fresh = self.blobs.put_file(self.file("b", b"published mid-sweep"))
+        got = self.blobs.sweep(keep={old["digest"]}, candidates=candidates, grace_s=0)
+        self.assertEqual({"deleted": 0, "already_gone": 0}, got)
+        self.assertTrue(self.blobs.has(fresh["digest"]), "it was never a candidate")
+        self.assertTrue(self.blobs.has(old["digest"]))
+
+    def test_listing_inside_the_sweep_is_what_loses_it(self):
+        """The same interleaving without pre-listed candidates, to show the difference is
+        real rather than asserted."""
+        old = self.blobs.put_file(self.file("a", b"already here"))
+        fresh = self.blobs.put_file(self.file("b", b"published mid-sweep"))
+        self.blobs.sweep(keep={old["digest"]}, grace_s=0)
+        self.assertFalse(self.blobs.has(fresh["digest"]))
+
+    def test_candidates_are_used_as_given(self):
+        a = self.blobs.put_file(self.file("a", b"one"))
+        b = self.blobs.put_file(self.file("b", b"two"))
+        got = self.blobs.sweep(keep=set(), allow_empty=True,
+                               candidates=[c for c in self.blobs.entries(
+                                   older_than=time.time() + 60)
+                                   if c["digest"] == a["digest"]])
+        self.assertEqual(1, got["deleted"])
+        self.assertFalse(self.blobs.has(a["digest"]))
+        self.assertTrue(self.blobs.has(b["digest"]), "not offered, not deleted")
+
+    def test_an_empty_candidate_list_still_refuses_an_empty_keep_set(self):
+        with self.assertRaises(EmptyKeepSet):
+            self.blobs.sweep(keep=set(), candidates=[])

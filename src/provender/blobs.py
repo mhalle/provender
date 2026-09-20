@@ -169,7 +169,7 @@ class Blobs:
         return out
 
     def sweep(self, *, keep, grace_s: float = GRACE_S, now: float | None = None,
-              allow_empty: bool = False) -> dict:
+              allow_empty: bool = False, candidates=None) -> dict:
         """Delete blobs under this prefix that ``keep`` does not contain and that are older
         than ``grace_s``.
 
@@ -190,6 +190,15 @@ class Blobs:
         Deleting everything is a legitimate request and a catastrophic accident, so it has
         to be said on purpose (``EmptyKeepSet``). Both defaults follow one rule: cleanup
         refuses what it cannot account for, and anything dangerous is done on purpose.
+
+        ``candidates`` is a list from an EARLIER :meth:`entries` call, and it is how a
+        caller keeps the ordering that matters: listing blobs BEFORE reading its index
+        means anything written afterwards was never a candidate, which holds whatever the
+        clocks say. Listing inside this method instead leaves only the age comparison
+        between the caller's clock and the store's - and S3 truncates last-modified to
+        whole seconds, so with ``grace_s=0`` a blob written moments ago can read as old
+        enough to take (found reviewing haversack's use, 2026-09-20). Candidates are used
+        as given; the age filter belongs to the :meth:`entries` call that produced them.
         """
         import time as _time
 
@@ -200,9 +209,11 @@ class Blobs:
                 "sweep was given no live digests: pass allow_empty=True to mean "
                 "'delete every blob under this prefix', or fix the caller that could "
                 "not read its index")
-        cutoff = (_time.time() if now is None else now) - grace_s
+        if candidates is None:
+            cutoff = (_time.time() if now is None else now) - grace_s
+            candidates = self.entries(older_than=cutoff)
         deleted, spared = 0, 0
-        for blob in self.entries(older_than=cutoff):
+        for blob in candidates:
             if blob["digest"] in live:
                 continue
             try:
