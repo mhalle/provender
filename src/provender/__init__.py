@@ -11,6 +11,6 @@ functions that talk to a store.
 from .blobs import CHUNK, GRACE_S, Blobs, EmptyKeepSet, digest_file
 from .store import StoreUnsuitable, check_store, open_store, update_mode
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 __all__ = ["Blobs", "CHUNK", "GRACE_S", "EmptyKeepSet", "StoreUnsuitable", "check_store",
            "digest_file", "open_store", "update_mode", "__version__"]

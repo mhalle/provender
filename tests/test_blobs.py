@@ -1,6 +1,6 @@
 """The blob half, against obstore's in-memory store.
 
-Every test here came from haversack's `test_objectcache.py`, where these behaviours were
+Every test here came from haversack's `test_objectcache.py`, where these behaviors were
 found - several of them by an adversarial review round on 2026-09-19 - and each pins one
 property the extraction must not lose.
 """
