@@ -20,14 +20,18 @@ obstore = pytest.importorskip("obstore")
 from obstore.store import LocalStore, MemoryStore  # noqa: E402
 
 from provender import (GRACE_S, Blobs, EmptyKeepSet, StoreUnsuitable,  # noqa: E402
-                       check_store, digest_file, open_store)
+                       check_store, digest_file, open_store, ops)
 
 
 class _Fixture(unittest.TestCase):
+    def make_store(self):
+        """``test_disk.py`` overrides this to rerun every test here on a DiskStore."""
+        return MemoryStore()
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
-        self.store = MemoryStore()
+        self.store = self.make_store()
         self.blobs = Blobs(self.store, "proj/")
 
     def tearDown(self):
@@ -80,7 +84,7 @@ class TestFetch(_Fixture):
 
     def test_a_blob_that_does_not_match_its_name_is_false_and_leaves_nothing(self):
         blob = self.blobs.put_file(self.file("a", b"payload"))
-        obstore.put(self.store, self.blobs.path(blob["digest"]), b"tampered")
+        ops.put(self.store, self.blobs.path(blob["digest"]), b"tampered")
         dest = self.tmp / "out"
         self.assertFalse(self.blobs.fetch(blob["digest"], dest))
         self.assertFalse(dest.exists(), "a verified fetch never leaves unverified bytes")
@@ -89,7 +93,7 @@ class TestFetch(_Fixture):
         """One client's bad read is not grounds to delete bytes every writer of that
         content shares - a truncated stream reads exactly like a corrupt object."""
         blob = self.blobs.put_file(self.file("a", b"payload"))
-        obstore.put(self.store, self.blobs.path(blob["digest"]), b"tampered")
+        ops.put(self.store, self.blobs.path(blob["digest"]), b"tampered")
         self.blobs.fetch(blob["digest"], self.tmp / "out")
         self.assertTrue(self.blobs.has(blob["digest"]), "not deleted")
         self.assertIn(blob["digest"], self.blobs.suspect)
@@ -156,8 +160,8 @@ class TestListingAndSweep(_Fixture):
                          self.blobs.sweep(keep=set(), grace_s=0, allow_empty=True))
 
     def test_a_foreign_object_under_blobs_is_left_alone(self):
-        obstore.put(self.store, "proj/blobs/sha256/notadigest", b"x")
-        obstore.put(self.store, "proj/blobs/sha256/nested/thing", b"x")
+        ops.put(self.store, "proj/blobs/sha256/notadigest", b"x")
+        ops.put(self.store, "proj/blobs/sha256/nested/thing", b"x")
         self.assertEqual([], self.blobs.entries())
         self.assertEqual({"deleted": 0, "already_gone": 0, "refreshed": 0},
                          self.blobs.sweep(keep=set(), grace_s=0, allow_empty=True))
@@ -276,7 +280,7 @@ class TestPutBytes(_Fixture):
 
     def test_put_bytes_replaces_a_suspect_blob(self):
         blob = self.blobs.put_bytes(b"content")
-        obstore.put(self.store, self.blobs.path(blob["digest"]), b"tampered")
+        ops.put(self.store, self.blobs.path(blob["digest"]), b"tampered")
         self.assertFalse(self.blobs.fetch(blob["digest"], self.tmp / "out"))
         self.assertIn(blob["digest"], self.blobs.suspect)
         self.blobs.put_bytes(b"content")

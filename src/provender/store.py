@@ -36,10 +36,11 @@ def open_store(url: str):
         # An earlier version read a prefix out of the URL fragment, which nobody would
         # guess and nothing tested (feldglas review, 2026-09-20). Pass a prefix to `Blobs`
         # if you want to namespace inside a directory.
-        from obstore.store import LocalStore
-        root = Path(u.path)
-        root.mkdir(parents=True, exist_ok=True)
-        return LocalStore(root), ""
+        # A DiskStore, not obstore's LocalStore (2026-09-23): it honors replace-if-unchanged
+        # as well, so the mutable half runs on a directory too. It reads the same files a
+        # LocalStore wrote - an object is a file at its path in both.
+        from .disk import DiskStore
+        return DiskStore(Path(u.path)), ""
     if scheme in ("s3", "s3a", "gs", "az", "abfs", "abfss") and u.netloc:
         from obstore.store import from_url
         return from_url(f"{scheme}://{u.netloc}"), _prefix(u.path)
@@ -56,7 +57,8 @@ def check_store(store, prefix: str = "", *, updates: bool = True) -> None:
     """Refuse a store on which this protocol would silently lose writes.
 
     Asked of the store rather than assumed, because the answer varies and the docs do not
-    say: obstore's own local-filesystem store cannot replace an object conditionally, and
+    say: obstore's own local-filesystem store cannot replace an object conditionally (use
+    :class:`provender.DiskStore`, which can), and
     S3-compatible services differ (Cloudflare R2 and AWS honor both; some ignore the
     headers entirely, which would let two writers each believe they had won).
 
@@ -65,7 +67,7 @@ def check_store(store, prefix: str = "", *, updates: bool = True) -> None:
       needs replace-if-unchanged to succeed with the current etag and to FAIL with a stale
       one. Pass False if you only ever write blobs.
     """
-    import obstore
+    from . import ops
     from obstore.exceptions import (AlreadyExistsError, NotSupportedError,
                                     PreconditionError)
     path = f"{prefix}.probe/{uuid.uuid4().hex}"
@@ -75,14 +77,15 @@ def check_store(store, prefix: str = "", *, updates: bool = True) -> None:
         return StoreUnsuitable(
             f"store ({name}) {why}: a shared cache needs create-if-absent"
             + (" and replace-if-unchanged writes" if updates else " writes")
-            + "; S3, GCS, Azure and R2 do this, a local filesystem store does not")
+            + "; S3, GCS, Azure, R2 and provender.DiskStore do this, obstore's "
+            "LocalStore does not")
     try:
         try:
-            obstore.put(store, path, b"0", mode="create")
+            ops.put(store, path, b"0", mode="create")
         except (NotImplementedError, NotSupportedError, TypeError) as e:
             raise refuse(f"cannot create-if-absent ({e})") from None
         try:
-            obstore.put(store, path, b"1", mode="create")
+            ops.put(store, path, b"1", mode="create")
         except AlreadyExistsError:
             pass
         except (NotImplementedError, NotSupportedError, TypeError) as e:
@@ -91,22 +94,22 @@ def check_store(store, prefix: str = "", *, updates: bool = True) -> None:
             raise refuse("overwrote an existing object on create-if-absent")
         if not updates:
             return
-        stale = update_mode(obstore.head(store, path))
+        stale = update_mode(ops.head(store, path))
         try:
-            obstore.put(store, path, b"2", mode=stale)
+            ops.put(store, path, b"2", mode=stale)
         except (NotImplementedError, NotSupportedError, TypeError) as e:
             raise refuse(f"cannot replace-if-unchanged ({e})") from None
         except PreconditionError:
             raise refuse("refused a replace carrying the current etag") from None
         try:
-            obstore.put(store, path, b"3", mode=stale)
+            ops.put(store, path, b"3", mode=stale)
         except PreconditionError:
             pass
         else:
             raise refuse("accepted a replace carrying a stale etag")
     finally:
         try:
-            obstore.delete(store, path)
+            ops.delete(store, path)
         except Exception:                      # noqa: BLE001 - a probe left behind is litter
             pass
 

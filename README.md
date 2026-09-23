@@ -20,8 +20,46 @@ blobs.sweep(keep=live_digests)              # deletes unreferenced blobs over a 
 
 `check_store(store, prefix)` — without `updates=False` — also demands
 replace-if-unchanged, which only the mutable half (0.2) needs. Ask for it if you will want
-that half: S3, GCS, Azure and R2 all pass, while obstore's local-filesystem store passes
-the blobs-only check and fails the other.
+that half: S3, GCS, Azure, R2 and provender's own `DiskStore` all pass, while obstore's
+`LocalStore` passes the blobs-only check and fails the other.
+
+## On a local disk: `DiskStore`
+
+`open_store("file:///path")` returns a `DiskStore`: a directory that honors **both**
+conditional writes, so the same protocol runs on a laptop with no network as on a bucket,
+and a copy between the two is a sync rather than a translation.
+
+```python
+from provender import DiskStore, check_store, ops
+
+store = DiskStore("/var/cache/myproject")
+check_store(store)                                    # passes, updates included
+ops.put(store, "refs/k.json", b"{...}", mode="create")
+meta = ops.head(store, "refs/k.json")
+ops.put(store, "refs/k.json", b"{...v2}", mode={"e_tag": meta["e_tag"]})  # or PreconditionError
+```
+
+`provender.ops` has obstore's six calls - `get`, `put`, `head`, `copy`, `list`, `delete` -
+with obstore's arguments, return shapes and exceptions, answered by a `DiskStore` itself
+and passed to obstore for anything else. Code written against a bucket through `ops` runs
+unchanged on a directory; `Blobs` is written that way.
+
+How it keeps its promises:
+
+- **Objects appear whole**: written to a temporary file, flushed, renamed into place. A
+  reader holds the file it opened, whatever replaces it meanwhile.
+- **Conditional writes are decided under an exclusive `flock`** (one of 1,024 lock files,
+  chosen by the path's hash); only the comparison and the rename happen under it. A process
+  that dies holding a lock releases it with its descriptors.
+- **An ETag is the SHA-256 of the content** (up to 16 MB; S3's is the MD5), so it changes
+  exactly when the bytes do - not through a reused inode or a coarse clock, both of which
+  exFAT has.
+
+Its limits: **one host** (`flock` is not trusted over a network filesystem - share through
+a bucket); a path cannot be both an object and a prefix; names are case-sensitive only where
+the filesystem is; and macOS's `._*` and `.DS_Store` files are neither listed nor
+addressable. Tested on APFS and on a real exFAT volume, where obstore's `LocalStore` cannot
+create-if-absent at all (its exclusive rename is unsupported there).
 
 ## What it is
 
@@ -89,7 +127,7 @@ assumes a name maps to a digest it can predict.
 
 ## Status
 
-0.1 is the blob half. The mutable half - a pointer per key, replaced by compare-and-swap,
-with bounded history, and an envelope whose `body` the package never reads - follows in
-0.2, together with a local-filesystem backend behind the same interfaces. Both already
-exist in haversack and move here once their interfaces are cut against a second backend.
+0.1 is the blob half, plus (since 2026-09-23) the local-filesystem backend, `DiskStore`.
+The mutable half - a pointer per key, replaced by compare-and-swap, with bounded history,
+and an envelope whose `body` the package never reads - follows in 0.2. It exists in
+haversack, and now has the second backend its interface was waiting to be cut against.

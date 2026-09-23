@@ -78,16 +78,16 @@ class Blobs:
         in both haversack's sweep and its delete (2026-09-20). Refreshing makes the blob as
         young as the reference to it, which is what the grace is measured against.
         """
-        import obstore
+        from . import ops
         from obstore.exceptions import AlreadyExistsError
         src = Path(src)
         blob = {"digest": digest_file(src), "size": src.stat().st_size}
         if blob["digest"] in self.suspect:
-            obstore.put(self.store, self.path(blob["digest"]), src)
+            ops.put(self.store, self.path(blob["digest"]), src)
             self.suspect -= {blob["digest"]}
         elif not self.touch(blob["digest"]):
             try:
-                obstore.put(self.store, self.path(blob["digest"]), src, mode="create")
+                ops.put(self.store, self.path(blob["digest"]), src, mode="create")
             except AlreadyExistsError:
                 self.touch(blob["digest"])     # someone else wrote the same bytes first
         return blob
@@ -101,9 +101,9 @@ class Blobs:
         timestamp alone and answers True: the blob IS present, which is what the caller
         asked, and the caller's own grace still covers the window.
         """
-        import obstore
+        from . import ops
         try:
-            obstore.copy(self.store, self.path(digest), self.path(digest), overwrite=True)
+            ops.copy(self.store, self.path(digest), self.path(digest), overwrite=True)
             return True
         except FileNotFoundError:
             return False
@@ -111,23 +111,23 @@ class Blobs:
             return self.has(digest)
 
     def put_bytes(self, data: bytes) -> dict:
-        import obstore
+        from . import ops
         from obstore.exceptions import AlreadyExistsError
         blob = {"digest": f"sha256:{hashlib.sha256(data).hexdigest()}", "size": len(data)}
         if blob["digest"] in self.suspect:
-            obstore.put(self.store, self.path(blob["digest"]), data)
+            ops.put(self.store, self.path(blob["digest"]), data)
             self.suspect -= {blob["digest"]}
         elif not self.touch(blob["digest"]):
             try:
-                obstore.put(self.store, self.path(blob["digest"]), data, mode="create")
+                ops.put(self.store, self.path(blob["digest"]), data, mode="create")
             except AlreadyExistsError:
                 self.touch(blob["digest"])
         return blob
 
     def has(self, digest: str) -> bool:
-        import obstore
+        from . import ops
         try:
-            obstore.head(self.store, self.path(digest))
+            ops.head(self.store, self.path(digest))
         except FileNotFoundError:
             return False
         return True
@@ -148,13 +148,13 @@ class Blobs:
         Written to a temporary name beside ``dest`` and renamed, so a reader of ``dest``
         sees either nothing or the whole verified blob.
         """
-        import obstore
+        from . import ops
         dest = Path(dest)
         tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex[:8]}.part")
         h = hashlib.sha256()
         try:
             with open(tmp, "wb") as f:
-                for chunk in obstore.get(self.store, self.path(digest)).stream(
+                for chunk in ops.get(self.store, self.path(digest)).stream(
                         min_chunk_size=CHUNK):
                     h.update(chunk)
                     f.write(chunk)
@@ -178,9 +178,9 @@ class Blobs:
         """
         import datetime as _dt
 
-        import obstore
+        from . import ops
         out = []
-        for batch in obstore.list(self.store, self.base):
+        for batch in ops.list(self.store, self.base):
             for obj in batch:
                 name = obj["path"][len(self.base):]
                 if "/" in name or len(name) != 64:
@@ -239,7 +239,7 @@ class Blobs:
         """
         import time as _time
 
-        import obstore
+        from . import ops
         live = {d if isinstance(d, str) else d["digest"] for d in keep}
         if not live and not allow_empty:
             raise EmptyKeepSet(
@@ -257,7 +257,7 @@ class Blobs:
                 refreshed += 1                 # written or refreshed since it was listed
                 continue
             try:
-                obstore.delete(self.store, self.path(blob["digest"]))
+                ops.delete(self.store, self.path(blob["digest"]))
             except FileNotFoundError:
                 spared += 1                    # already gone: not this sweep's doing
                 continue
@@ -269,12 +269,12 @@ class Blobs:
         CHANGED: a sweep that cannot tell does not delete."""
         import datetime as _dt
 
-        import obstore
+        from . import ops
         listed = blob.get("modified")
         if listed is None:
             return False
         try:
-            meta = obstore.head(self.store, self.path(blob["digest"]))
+            meta = ops.head(self.store, self.path(blob["digest"]))
         except FileNotFoundError:
             return True                        # gone already; the delete will say so
         except Exception:                      # noqa: BLE001 - see the docstring
