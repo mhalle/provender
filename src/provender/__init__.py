@@ -17,6 +17,6 @@ from .blobs import CHUNK, GRACE_S, Blobs, EmptyKeepSet, digest_file
 from .disk import DiskStore
 from .store import StoreUnsuitable, check_store, open_store, update_mode
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 __all__ = ["Blobs", "CHUNK", "DiskStore", "GRACE_S", "EmptyKeepSet", "StoreUnsuitable",
            "check_store", "digest_file", "ops", "open_store", "update_mode", "__version__"]
